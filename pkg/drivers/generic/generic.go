@@ -336,26 +336,33 @@ func (d *Generic) DeleteRevision(ctx context.Context, revision int64) error {
 
 func (d *Generic) ListCurrent(ctx context.Context, prefix string, limit int64, includeDeleted bool) (*sql.Rows, error) {
 	sql := d.GetCurrentSQL
+	limitString := "ALL"
 	if limit > 0 {
-		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
+		limitString = strconv.Itoa(int(limit))
 	}
-	return d.query(ctx, sql, prefix, includeDeleted)
+	return d.query(ctx, sql, prefix, includeDeleted, limitString)
 }
 
 func (d *Generic) List(ctx context.Context, prefix, startKey string, limit, revision int64, includeDeleted bool) (*sql.Rows, error) {
 	if startKey == "" {
 		sql := d.ListRevisionStartSQL
+
+		limitString := "ALL"
 		if limit > 0 {
-			sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
+			limitString = strconv.Itoa(int(limit))
 		}
-		return d.query(ctx, sql, prefix, revision, includeDeleted)
+
+		return d.query(ctx, sql, prefix, revision, includeDeleted, limitString)
 	}
 
 	sql := d.GetRevisionAfterSQL
+
+	limitString := "ALL"
 	if limit > 0 {
-		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
+		limitString = strconv.Itoa(int(limit))
 	}
-	return d.query(ctx, sql, prefix, revision, startKey, revision, includeDeleted)
+
+	return d.query(ctx, sql, prefix, revision, startKey, includeDeleted, limitString)
 }
 
 func (d *Generic) Count(ctx context.Context, prefix string) (int64, int64, error) {
@@ -364,7 +371,7 @@ func (d *Generic) Count(ctx context.Context, prefix string) (int64, int64, error
 		id  int64
 	)
 
-	row := d.queryRow(ctx, d.CountSQL, prefix, false)
+	row := d.queryRow(ctx, d.CountSQL, prefix)
 	err := row.Scan(&rev, &id)
 	return rev.Int64, id, err
 }
@@ -381,10 +388,14 @@ func (d *Generic) CurrentRevision(ctx context.Context) (int64, error) {
 
 func (d *Generic) After(ctx context.Context, prefix string, rev, limit int64) (*sql.Rows, error) {
 	sql := d.AfterSQL
+
+	// TODO: this will break other dialects until they are updated as well
+	limitString := "ALL"
 	if limit > 0 {
-		sql = fmt.Sprintf("%s LIMIT %d", sql, limit)
+		limitString = strconv.Itoa(int(limit))
 	}
-	return d.query(ctx, sql, prefix, rev)
+
+	return d.query(ctx, sql, prefix, rev, limitString)
 }
 
 func (d *Generic) Fill(ctx context.Context, revision int64) error {
