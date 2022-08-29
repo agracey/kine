@@ -10,11 +10,15 @@ import (
 	
 	"github.com/sirupsen/logrus"
 	"github.com/k3s-io/kine/pkg/util"
+	"github.com/k3s-io/kine/pkg/drivers/generic"
 	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
+const (
+	defaultMaxIdleConns = 2 // copied from database/sql
+)
 
 var (
 	schema = []string{
@@ -25,41 +29,23 @@ var (
 		  
 		// $$ LANGUAGE plpgsql;`,
 
-		// insert
-		// TODO: id should probably be incrementing globally, not just per table?
-		`CREATE OR REPLACE FUNCTION insert (
-			_id INTEGER,
-			_name VARCHAR(630),
-			_create INTEGER,
-			_delete INTEGER,
-			_create_revision INTEGER,
-			_prev_revision INTEGER,
-			_lease INTEGER,
-			_value bytea,
-			_old_value bytea
+		`CREATE IF NOT EXISTS SEQUENCE revision_seq`,
+
+		`CREATE OR REPLACE FUNCTION get_table_name (
+			_key VARCHAR(630),
 		) 
-		RETURNS TABLE (
-			id INTEGER
-		)
-		AS $$
-			DECLARE 
-				_table_name VARCHAR(630) := split_part(_name, '/', 3);
+		RETURNS VARCHAR(630) 
+		AS $$ 
+		DECLARE 
+			_table_name VARCHAR(630) := split_part(_name, '/', 3);
 
-			BEGIN
+		BEGIN
+			_table_name := '"kine' || _table_name || '"';
 
-				IF _table_name = '' THEN
-				  _table_name := 'kine';
-				  ELSE
-					_table_name := 'kine' || _table_name;
-				END IF;
-				_table_name := '"' || _table_name || '"';
-
-				IF to_regclass(_table_name) IS NULL THEN
-				RAISE WARNING '% IS NULL', _table_name;
-
-				  EXECUTE 'CREATE TABLE IF NOT EXISTS ' || _table_name || ' (
-					id SERIAL PRIMARY KEY,
-					name VARCHAR(630),
+			IF to_regclass(_table_name) IS NULL THEN
+				EXECUTE 'CREATE TABLE IF NOT EXISTS ' || _table_name || ' (
+					id PRIMARY KEY DEFAULT NEXTVAL('revision_seq'),
+					name VARCHAR(630) UNIQUE,
 					created INTEGER,
 					deleted INTEGER,
 					create_revision INTEGER,
@@ -67,21 +53,11 @@ var (
 					lease INTEGER,
 					value bytea,
 					old_value bytea
-				  );';
+				);';
+			END IF
 
-				  EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS name ON ' || _table_name || ' (name)';
-			    END IF;
-
-				RETURN QUERY EXECUTE format(
-					'INSERT  INTO ' || _table_name || 
-					' (name, created, deleted, create_revision, prev_revision, lease, value, old_value) 
-					VALUES ($2, $3, $4, $5, $6, $7, $8, $9) 
-					ON CONFLICT (name) DO UPDATE 
-					SET old_value = '|| _table_name ||'.value, id = EXCLUDED.id, prev_revision = '|| _table_name ||'.id
-					RETURNING id;')
-				USING _table_name, _name, _create, _delete, _create_revision, _prev_revision, _lease, _value, _old_value;
-
-			END
+			RETURN _table_name
+		END
 		$$ LANGUAGE plpgsql;`,
 
 		`CREATE OR REPLACE FUNCTION upsert (
@@ -97,35 +73,9 @@ var (
 		)
 		AS $$
 			DECLARE 
-				_table_name VARCHAR(630) := split_part(_name, '/', 3);
+				_table_name VARCHAR(630) := get_table_name(_name);
 
 			BEGIN
-
-				IF _table_name = '' THEN
-				  _table_name := 'kine';
-				  ELSE
-					_table_name := 'kine' || _table_name;
-				END IF;
-				_table_name := '"' || _table_name || '"';
-
-				IF to_regclass(_table_name) IS NULL THEN
-				RAISE WARNING '% IS NULL', _table_name;
-
-				  EXECUTE 'CREATE TABLE IF NOT EXISTS ' || _table_name || ' (
-					id SERIAL PRIMARY KEY,
-					name VARCHAR(630),
-					created INTEGER,
-					deleted INTEGER,
-					create_revision INTEGER,
-					prev_revision INTEGER,
-					lease INTEGER,
-					value bytea,
-					old_value bytea
-				  );';
-
-				  EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS name ON ' || _table_name || ' (name)';
-			    END IF;
-
 				RETURN QUERY EXECUTE format(
 					'INSERT  INTO ' || _table_name || 
 					' (name, created, deleted, lease, value) 
@@ -144,27 +94,19 @@ var (
 			value bytea,
 		  ) AS $$
 		DECLARE 
-			_table_name VARCHAR(630) := split_part(_name, '/', 3);
+			_table_name VARCHAR(630) := get_table_name(_name);
 		BEGIN
-			IF _table_name = '' THEN
-				_table_name := 'kine';
-			ELSE
-				_table_name := 'kine' || _table_name;
-			END IF;
-			_table_name := '"' || _table_name || '"';
 
 			IF to_regclass(_table_name) IS NULL THEN
-				RAISE WARNING '% is null', _table_name;
 				RETURN ;
 			END IF;
 
-			RETURN QUERY EXECUTE format('UPDATE '
+			RETURN QUERY EXECUTE format('UPDATE ')
 	
 		END;
 		$$ LANGUAGE plpgsql;`,
 
 		// list
-		// TODO clean up after pivot of golang code
 		`CREATE OR REPLACE FUNCTION list(_name VARCHAR(630), _limit VARCHAR(630), _deleted BOOLEAN, _startKey VARCHAR(630), _revision INTEGER ) 
 		  RETURNS TABLE (
 			id INTEGER, 
@@ -181,22 +123,16 @@ var (
 		  ) 
 		  AS $$
 			DECLARE 
-				_table_name VARCHAR(630) := split_part(_name, '/', 3);
+				_table_name VARCHAR(630) := get_table_name(_name);
 				_startId INTEGER := 0;
 	
 			BEGIN 
-			  IF _table_name = '' THEN
-			    _table_name := 'kine';
-			  ELSE
-			    _table_name := 'kine' || _table_name;
-			  END IF;
-			  _table_name := '"' || _table_name || '"';
 
 			  IF to_regclass(_table_name) IS NULL THEN
-			    RAISE WARNING '% is null', _table_name;
 				RETURN ;
 			  END IF;
 			  
+			  --- TODO why is this needed?
 			  IF _startKey != '' THEN
 			    _startId := (SELECT MAX(ikv.id) AS id 
 			      FROM kine AS ikv 
@@ -207,12 +143,13 @@ var (
 			RETURN QUERY EXECUTE format(E'SELECT 
 			  id,
 			  (
+				--- TODO why is this needed?
 				SELECT 
-				  MAX(crkv.prev_revision) AS prev_revision 
+				  MAX(kine.prev_revision) AS compact_rev
 				FROM 
-				  kine AS crkv 
+				  kine
 				WHERE 
-				  crkv.name = \'compact_rev_key\'
+				kine.name = \'compact_rev_key\'
 			  ),
 			  id AS theid, 
 			  kv.name, 
@@ -242,52 +179,36 @@ var (
 		)
 		AS $$
 			DECLARE 
-				_table_name VARCHAR(630) := split_part(_name, '/',3);
+				_table_name VARCHAR(630) := get_table_name(_name);
 			BEGIN 
-
-			IF _table_name = '' OR _table_name = 'kine' THEN
-			  _table_name := 'kine';
-		    ELSE
-			  _table_name := 'kine' || _table_name;
-		    END IF;
-
-		    _table_name := '"' || _table_name || '"';
 			
 			IF to_regclass(_table_name) IS NULL THEN
-			  RETURN QUERY EXECUTE 'SELECT 0 as maxid, 0::bigint as count;';
+			  RETURN QUERY EXECUTE 'SELECT currval(\'revision_seq\') as maxid, 0::bigint as count;';
 			ELSE 
 			  RETURN QUERY EXECUTE format('
-			    SELECT max(id) as maxid, count(distinct(name)) as count FROM  '|| _table_name );
+			    SELECT currval(\'revision_seq\') as maxid, count(distinct(name)) as count FROM  '|| _table_name );
 			END IF;
 			
 			END
 		$$ LANGUAGE plpgsql;`,
 
-		// Keeping around to use for compact_rev_key tracking 
-		// TODO: delete after pivot of code
-		`CREATE TABLE IF NOT EXISTS kine
- 			(
- 				id SERIAL PRIMARY KEY,
-				name VARCHAR(630),
-				created INTEGER,
-				deleted INTEGER,
- 				create_revision INTEGER,
- 				prev_revision INTEGER,
- 				lease INTEGER,
- 				value bytea,
- 				old_value bytea
- 			);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS kine_name_index ON kine (name)`,
-		`CREATE INDEX IF NOT EXISTS kine_name_id_index ON kine (name,id)`,
-		`CREATE INDEX IF NOT EXISTS kine_id_deleted_index ON kine (id,deleted)`,
-		`CREATE INDEX IF NOT EXISTS kine_prev_revision_index ON kine (prev_revision)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS kine_name_prev_revision_uindex ON kine (name, prev_revision)`,
 	}
 	createDB = "CREATE DATABASE "
 )
 
 
-func setup(db *sql.DB) error {
+func setup(db *sql.DB, connPoolConfig generic.ConnectionPoolConfig) error {
+
+	if connPoolConfig.MaxIdle < 0 {
+		connPoolConfig.MaxIdle = 0
+	} else if connPoolConfig.MaxIdle == 0 {
+		connPoolConfig.MaxIdle = defaultMaxIdleConns
+	}
+
+	logrus.Infof("Configuring postgres database connection pooling: maxIdleConns=%d, maxOpenConns=%d, connMaxLifetime=%s", connPoolConfig.MaxIdle, connPoolConfig.MaxOpen, connPoolConfig.MaxLifetime)
+	db.SetMaxIdleConns(connPoolConfig.MaxIdle)
+	db.SetMaxOpenConns(connPoolConfig.MaxOpen)
+	db.SetConnMaxLifetime(connPoolConfig.MaxLifetime)
 
 	logrus.Infof("Configuring database table schema and indexes, this may take a moment...")
 	for _, stmt := range schema {
@@ -349,7 +270,7 @@ type ConnectionPoolConfig struct {
 	MaxLifetime time.Duration // maximum amount of time a connection may be reused
 }
 
-func openAndTest(driverName, dataSourceName string) (*sql.DB, error) {
+func openAndTest(dataSourceName string) (*sql.DB, error) {
 	db, err := sql.Open("postgres", dataSourceName)
 	if err != nil {
 		return nil, err

@@ -2,45 +2,45 @@ package pgsql
 
 import (
 	"context"
-	"sync"
+	"fmt"
 	"time"
 	"database/sql"
 	"strings"
+	"github.com/lib/pq"
 
+	//"github.com/Rican7/retry/backoff"
+	//"github.com/Rican7/retry/strategy"
 	"github.com/sirupsen/logrus"
+	
+	"github.com/k3s-io/kine/pkg/util"
 	"github.com/k3s-io/kine/pkg/server"
-	"github.com/k3s-io/kine/pkg/broadcaster"
 	"github.com/k3s-io/kine/pkg/metrics"
+	"github.com/k3s-io/kine/pkg/broadcaster"
 )
 
-type Log interface {
-	Start(ctx context.Context) error
-	CurrentRevision(ctx context.Context) (int64, error)
-	List(ctx context.Context, prefix, startKey string, limit, revision int64, includeDeletes bool) (int64, []*server.Event, error)
-	After(ctx context.Context, prefix string, revision, limit int64) (int64, []*server.Event, error)
-	Watch(ctx context.Context, prefix string) <-chan []*server.Event
-	Count(ctx context.Context, prefix string) (int64, int64, error)
-	Append(ctx context.Context, event *server.Event) (int64, error)
-	DbSize(ctx context.Context) (int64, error)
-}
 
 type PGStructured struct {
 	DB *sql.DB
 	DatabaseName string
+	broadcaster broadcaster.Broadcaster
+	notify      chan interface{} //TODO rename
+	pollCtx context.Context
 }
 
-
-func (l *PGStructured) Start(ctx context.Context) error {
+func (s *PGStructured) Start(ctx context.Context) error {
 	//TODO Start "compaction" (really just deleting what's marked as deleted)
 
 
 	// See https://github.com/kubernetes/kubernetes/blob/442a69c3bdf6fe8e525b05887e57d89db1e2f3a5/staging/src/k8s.io/apiserver/pkg/storage/storagebackend/factory/etcd3.go#L97
-	if _, err := l.Create(ctx, "/registry/health", []byte(`{"health":"true"}`), 0); err != nil {
+	if _, err := s.Create(ctx, "/registry/health", []byte(`{"health":"true"}`), 0); err != nil {
 		if err != server.ErrKeyExists {
 			logrus.Errorf("Failed to create health check key: %v", err)
 		}
 	}
-	go l.ttl(ctx)
+
+	s.startPoll(ctx)
+
+	//TODO go l.ttl(ctx)
 	return nil
 }
 
@@ -144,9 +144,9 @@ func (l *PGStructured) List(ctx context.Context, prefix, startKey string, limit,
 		return 0,nil,err
 	}
 
-	kvRet := make([]*server.KeyValue, 0, len(events))
+	kvRet = make([]*server.KeyValue, 0, len(events))
 	for _, event := range events {
-		kvRet = append(kvs, event.KV)
+		kvRet = append(kvRet, event.KV)
 	}
 	return revRet, kvRet, nil
 }
@@ -163,8 +163,8 @@ func (l *PGStructured) Count(ctx context.Context, prefix string) (revRet int64, 
 	}
 
 	row := l.queryRow(ctx, "SELECT maxid, count FROM countkeys($1);", prefix)
-	err := row.Scan(&revRet, &count)
-	return revRet, count, nil
+	err = row.Scan(&revRet, &count)
+	return revRet, count, err
 }
 
 func (l *PGStructured) Update(ctx context.Context, key string, value []byte, revision, lease int64) (revRet int64, kvRet *server.KeyValue, updateRet bool, errRet error) {
@@ -196,104 +196,142 @@ func (l *PGStructured) Update(ctx context.Context, key string, value []byte, rev
 }
 
 //TODO what is this?
-func (l *PGStructured) ttlEvents(ctx context.Context) chan *server.Event {
-	result := make(chan *server.Event)
-	wg := sync.WaitGroup{}
-	wg.Add(2)
+// func (l *PGStructured) ttlEvents(ctx context.Context) chan *server.Event {
+// 	result := make(chan *server.Event)
+// 	wg := sync.WaitGroup{}
+// 	wg.Add(2)
 
-	go func() {
-		wg.Wait()
-		close(result)
-	}()
+// 	go func() {
+// 		wg.Wait()
+// 		close(result)
+// 	}()
 
-	go func() {
-		defer wg.Done()
-		rev, events, err := l.log.List(ctx, "/", "", 1000, 0, false)
-		for len(events) > 0 {
-			if err != nil {
-				logrus.Errorf("failed to read old events for ttl")
-				return
-			}
+// 	go func() {
+// 		defer wg.Done()
+// 		rev, events, err := l.log.List(ctx, "/", "", 1000, 0, false)
+// 		for len(events) > 0 {
+// 			if err != nil {
+// 				logrus.Errorf("failed to read old events for ttl")
+// 				return
+// 			}
 
-			for _, event := range events {
-				if event.KV.Lease > 0 {
-					result <- event
-				}
-			}
+// 			for _, event := range events {
+// 				if event.KV.Lease > 0 {
+// 					result <- event
+// 				}
+// 			}
 
-			_, events, err = l.log.List(ctx, "/", events[len(events)-1].KV.Key, 1000, rev, false)
-		}
-	}()
+// 			_, events, err = l.log.List(ctx, "/", events[len(events)-1].KV.Key, 1000, rev, false)
+// 		}
+// 	}()
 
-	go func() {
-		defer wg.Done()
-		for events := range l.log.Watch(ctx, "/") {
-			for _, event := range events {
-				if event.KV.Lease > 0 {
-					result <- event
-				}
-			}
-		}
-	}()
+// 	go func() {
+// 		defer wg.Done()
+// 		for events := range l.log.Watch(ctx, "/") {
+// 			for _, event := range events {
+// 				if event.KV.Lease > 0 {
+// 					result <- event
+// 				}
+// 			}
+// 		}
+// 	}()
 
-	return result
+// 	return result
+// }
+
+// func (l *PGStructured) ttl(ctx context.Context) {
+// 	// vary naive TTL support
+// 	mutex := &sync.Mutex{}
+// 	for event := range l.ttlEvents(ctx) {
+// 		go func(event *server.Event) {
+// 			select {
+// 			case <-ctx.Done():
+// 				return
+// 			case <-time.After(time.Duration(event.KV.Lease) * time.Second):
+// 			}
+// 			mutex.Lock()
+// 			if _, _, _, err := l.Delete(ctx, event.KV.Key, event.KV.ModRevision); err != nil {
+// 				logrus.Errorf("failed to delete expired key: %v", err)
+// 			}
+// 			mutex.Unlock()
+// 		}(event)
+// 	}
+// }
+
+
+// Polling changes since we want to see changes from other instances as well 
+func (s *PGStructured) startPoll(ctx context.Context) (error) {
+
+
+	var (
+		rev     int64
+	)
+	
+	row := s.queryRow(ctx, "SELECT currval('revision_seq');")
+	err := row.Scan(&rev)
+	if err != nil {
+		return err
+	}
+	
+	go s.poll(ctx, s.notify, rev)
+
+	return nil
 }
 
-func (l *PGStructured) ttl(ctx context.Context) {
-	// vary naive TTL support
-	mutex := &sync.Mutex{}
-	for event := range l.ttlEvents(ctx) {
-		go func(event *server.Event) {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Duration(event.KV.Lease) * time.Second):
-			}
-			mutex.Lock()
-			if _, _, _, err := l.Delete(ctx, event.KV.Key, event.KV.ModRevision); err != nil {
-				logrus.Errorf("failed to delete expired key: %v", err)
-			}
-			mutex.Unlock()
-		}(event)
+// Start querying on interval and pumping into channel
+func (s *PGStructured) poll(ctx context.Context, result chan interface{}, pollStart int64) {
+
+	var (
+		last        = pollStart
+		//skipTime    time.Time
+	)
+
+	wait := time.NewTicker(time.Second)
+	defer wait.Stop()
+	defer close(result)
+
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wait.C:
+		}
+
+		rows, err := s.query(ctx, "SELECT * from list();", last)
+		if err != nil {
+			logrus.Errorf("Failed to list latest changes while watching: %v", err)
+			continue
+		}
+		_, rev, events, err := RowsToEvents(rows)
+		last = rev
+		if err != nil {
+			logrus.Errorf("fail to convert rows changes: %v", err)
+			continue
+		}
+
+		if len(events) == 0 {
+			continue
+		}
+		s.notify <- events
 	}
+
+
+	close(result)
+
 }
 
 //TODO pull channel into this file
-func (l *PGStructured) Watch(ctx context.Context, prefix string, revision int64) <-chan []*server.Event {
-	logrus.Tracef("WATCH %s, revision=%d", prefix, revision)
+func (s *PGStructured) Watch(ctx context.Context, prefix string, revision int64) <-chan []*server.Event {
 
 	// starting watching right away so we don't miss anything
 	ctx, cancel := context.WithCancel(ctx)
-	readChan := l.log.Watch(ctx, prefix)
-
-	// include the current revision in list
-	if revision > 0 {
-		revision--
-	}
-
 	result := make(chan []*server.Event, 100)
-
-	rev, kvs, err := l.log.After(ctx, prefix, revision, 0)
-	if err != nil {
-		logrus.Errorf("failed to list %s for revision %d", prefix, revision)
-		cancel()
-	}
-
-	logrus.Tracef("WATCH LIST key=%s rev=%d => rev=%d kvs=%d", prefix, revision, rev, len(kvs))
+	logrus.Tracef("WATCH LIST key=%s rev=%d", prefix, revision)
 
 	go func() {
-		lastRevision := revision
-		if len(kvs) > 0 {
-			lastRevision = rev
-		}
-
-		if len(kvs) > 0 {
-			result <- kvs
-		}
-
-		// always ensure we fully read the channel
-		for i := range readChan {
-			result <- filter(i, lastRevision)
+		for i := range s.notify {
+			result <- filter(i, true, prefix)
 		}
 		close(result)
 		cancel()
@@ -302,17 +340,23 @@ func (l *PGStructured) Watch(ctx context.Context, prefix string, revision int64)
 	return result
 }
 
-func filter(events []*server.Event, rev int64) []*server.Event {
-	for len(events) > 0 && events[0].KV.ModRevision <= rev {
-		events = events[1:]
+func filter(events interface{}, checkPrefix bool, prefix string) []*server.Event {
+	eventList := events.([]*server.Event)
+	filteredEventList := make([]*server.Event, 0, len(eventList))
+
+	for _, event := range eventList {
+		if (checkPrefix && strings.HasPrefix(event.KV.Key, prefix)) || event.KV.Key == prefix {
+			filteredEventList = append(filteredEventList, event)
+		}
 	}
 
-	return events
+	return filteredEventList
 }
+
 
 func (l *PGStructured) DbSize(ctx context.Context) (int64, error) {
 	var size int64
-	row := d.queryRow(ctx, fmt.Sprintf(`SELECT pg_database_size('%s');`, l.DatabaseName))
+	row := l.queryRow(ctx, fmt.Sprintf(`SELECT pg_database_size('%s');`, l.DatabaseName))
 	if err := row.Scan(&size); err != nil {
 		return 0, err
 	}
@@ -340,27 +384,24 @@ func (l *PGStructured) queryRow(ctx context.Context, sql string, args ...interfa
 	return l.DB.QueryRowContext(ctx, sql, args...)
 }
 
-func (l *PGStructured) execute(ctx context.Context, sql string, args ...interface{}) (result sql.Result, err error) {
-	if l.LockWrites {
-		l.Lock()
-		defer l.Unlock()
-	}
+// func (l *PGStructured) execute(ctx context.Context, sql string, args ...interface{}) (result sql.Result, err error) {
 
-	wait := strategy.Backoff(backoff.Linear(100 + time.Millisecond))
-	for i := uint(0); i < 20; i++ {
-		logrus.Tracef("EXEC (try: %d) %v : %s", i, args, util.Stripped(sql))
-		startTime := time.Now()
-		result, err = l.DB.ExecContext(ctx, sql, args...)
-		metrics.ObserveSQL(startTime, ErrCode(err), util.Stripped(sql), args)
-		// if err != nil && l.Retry != nil && l.Retry(err) {
-		// 	wait(i)
-		// 	continue
-		// }
-		return result, err
-	}
-	return
-}
+// 	wait := strategy.Backoff(backoff.Linear(100 + time.Millisecond))
+// 	for i := uint(0); i < 20; i++ {
+// 		logrus.Tracef("EXEC (try: %d) %v : %s", i, args, util.Stripped(sql))
+// 		startTime := time.Now()
+// 		result, err = l.DB.ExecContext(ctx, sql, args...)
+// 		metrics.ObserveSQL(startTime, ErrCode(err), util.Stripped(sql), args)
+// 		if err != nil /*&& l.Retry != nil && l.Retry(err)*/ {
+// 			wait(i)
+// 			continue
+// 		}
+// 		return result, err
+// 	}
+// 	return
+// }
 
+// TODO move this back to pgsql.go ?
 func ErrCode (err error) string {
 	if err == nil {
 		return ""
@@ -369,6 +410,13 @@ func ErrCode (err error) string {
 		return string(err.Code)
 	}
 	return err.Error()
+}
+
+func TranslateErr(err error) error {
+	if err, ok := err.(*pq.Error); ok && err.Code == "23505" {
+		return server.ErrKeyExists
+	}
+	return err
 }
 
 func RowsToEvents(rows *sql.Rows) (int64, int64, []*server.Event, error) {
@@ -388,4 +436,36 @@ func RowsToEvents(rows *sql.Rows) (int64, int64, []*server.Event, error) {
 	}
 
 	return rev, compact, result, nil
+}
+
+func scan(rows *sql.Rows, rev *int64, compact *int64, event *server.Event) error {
+	event.KV = &server.KeyValue{}
+	event.PrevKV = &server.KeyValue{}
+
+	c := &sql.NullInt64{}
+
+	err := rows.Scan(
+		rev,
+		c,
+		&event.KV.ModRevision,
+		&event.KV.Key,
+		&event.Create,
+		&event.Delete,
+		&event.KV.CreateRevision,
+		&event.PrevKV.ModRevision,
+		&event.KV.Lease,
+		&event.KV.Value,
+		&event.PrevKV.Value,
+	)
+	if err != nil {
+		return err
+	}
+
+	if event.Create {
+		event.KV.CreateRevision = event.KV.ModRevision
+		event.PrevKV = nil
+	}
+
+	*compact = c.Int64
+	return nil
 }
