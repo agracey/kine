@@ -29,22 +29,23 @@ var (
 		  
 		// $$ LANGUAGE plpgsql;`,
 
-		`CREATE IF NOT EXISTS SEQUENCE revision_seq`,
+		`CREATE SEQUENCE IF NOT EXISTS revision_seq`,
 
+		//get_table_name
 		`CREATE OR REPLACE FUNCTION get_table_name (
-			_key VARCHAR(630),
-		) 
+			_key VARCHAR(630)
+		)
 		RETURNS VARCHAR(630) 
 		AS $$ 
 		DECLARE 
-			_table_name VARCHAR(630) := split_part(_name, '/', 3);
+			_table_name VARCHAR(630) := split_part(_key, '/', 3);
 
 		BEGIN
 			_table_name := '"kine' || _table_name || '"';
 
 			IF to_regclass(_table_name) IS NULL THEN
-				EXECUTE 'CREATE TABLE IF NOT EXISTS ' || _table_name || ' (
-					id PRIMARY KEY DEFAULT NEXTVAL('revision_seq'),
+				EXECUTE 'CREATE TABLE IF NOT EXISTS ' || _table_name || E' (
+					id INTEGER PRIMARY KEY DEFAULT NEXTVAL(\'revision_seq\'),
 					name VARCHAR(630) UNIQUE,
 					created INTEGER,
 					deleted INTEGER,
@@ -54,12 +55,18 @@ var (
 					value bytea,
 					old_value bytea
 				);';
-			END IF
+			END IF;
 
-			RETURN _table_name
+			RETURN _table_name;
 		END
 		$$ LANGUAGE plpgsql;`,
 
+
+
+		// Create -- row := l.queryRow(ctx, "SELECT id FROM upsert($1, 1, 0, $2, $3);", key, lease, value)
+		// Update -- row := l.queryRow(ctx, "SELECT id, prev_revision FROM upsert($1, 1, 0, $2, $3);", key, lease, value)
+
+		//upsert
 		`CREATE OR REPLACE FUNCTION upsert (
 			_name VARCHAR(630),
 			_create INTEGER,
@@ -68,7 +75,7 @@ var (
 			_value bytea
 		) 
 		RETURNS TABLE (
-			id INTEGER
+			id INTEGER,
 			prev_revision INTEGER
 		)
 		AS $$
@@ -78,20 +85,24 @@ var (
 			BEGIN
 				RETURN QUERY EXECUTE format(
 					'INSERT  INTO ' || _table_name || 
-					' (name, created, deleted, lease, value) 
-					VALUES ($1, $2, $3, $4, $5) 
+					' (id, create_revision, name, created, deleted, lease, value) 
+					VALUES ($1, $1, $2, $3, $4, $5, $6) 
 					ON CONFLICT (name) DO UPDATE 
 					SET old_value = '|| _table_name ||'.value, id = EXCLUDED.id, prev_revision = '|| _table_name ||'.id
 					RETURNING id, prev_revision ;')
-				USING _name, _create, _delete, _lease, _value;
+				USING nextval('revision_seq'), _name, _create, _delete, _lease, _value;
+
 			END
 		$$ LANGUAGE plpgsql;`,
 
+		// Delete - row := l.queryRow(ctx, "SELECT id, key, value FROM markDeleted($1, $2);", key, revision)
+
+		//markDeleted
 		`CREATE OR REPLACE FUNCTION markDeleted(_name VARCHAR(630), _rev INTEGER) 
 		  RETURNS TABLE (
 			id INTEGER, 
 			key INTEGER,
-			value bytea,
+			value bytea
 		  ) AS $$
 		DECLARE 
 			_table_name VARCHAR(630) := get_table_name(_name);
@@ -101,11 +112,23 @@ var (
 				RETURN ;
 			END IF;
 
-			RETURN QUERY EXECUTE format('UPDATE ')
+			RETURN QUERY EXECUTE format('UPDATE '|| _table_name ||' 
+				SET id=$1, 
+					deleted=1, 
+					previous_rev=id, 
+					old_value=value, 
+					value=DEFAULT 
+				WHERE name=$2') 				
+				USING nextval('revision_seq'), _name ;
 	
 		END;
 		$$ LANGUAGE plpgsql;`,
 
+
+		//List -- rows, err := l.query(ctx, "SELECT * FROM list($1, $2, $3, $4);", prefix, limit, startKey, revision)
+		//Get -- rows, err := l.query(ctx, "SELECT * FROM list($1,$2, $3, $4, $5)", key, limit, includeDeletes, rangeEnd, revision)
+		
+		// TODO unsure about crossjoin...
 		// list
 		`CREATE OR REPLACE FUNCTION list(_name VARCHAR(630), _limit VARCHAR(630), _deleted BOOLEAN, _startKey VARCHAR(630), _revision INTEGER ) 
 		  RETURNS TABLE (
@@ -131,38 +154,36 @@ var (
 			  IF to_regclass(_table_name) IS NULL THEN
 				RETURN ;
 			  END IF;
-			  
-			  --- TODO why is this needed?
-			  IF _startKey != '' THEN
-			    _startId := (SELECT MAX(ikv.id) AS id 
-			      FROM kine AS ikv 
-			      WHERE ikv.name = _startKey
-				    AND ikv.id <= _revision);
+
+			  ---IF _startKey != '' 
+			  ---THEN
+			  ---  EXECUTE format(E'SELECT MAX(ikv.id) AS _startId 
+			  ---    FROM %s AS ikv 
+			  ---    WHERE ikv.name like \'%s\';' , _table_name, _startKey);
+			  ---END IF;
+			
+			  IF _limit = '0' THEN 
+			  	_limit := 'ALL';
 			  END IF;
 
 			RETURN QUERY EXECUTE format(E'SELECT 
-			  id,
-			  (
-				--- TODO why is this needed?
-				SELECT 
-				  MAX(kine.prev_revision) AS compact_rev
-				FROM 
-				  kine
-				WHERE 
-				kine.name = \'compact_rev_key\'
-			  ),
-			  id AS theid, 
+			  maxid,
+			  compact_rev,
+			  kv.id AS theid, 
 			  kv.name, 
 			  kv.created, 
 			  kv.deleted, 
-			  kv.create_revision, 
-			  kv.prev_revision, 
+			  coalesce(kv.create_revision,0), 
+			  coalesce(kv.prev_revision, id), 
 			  kv.lease, 
 			  kv.value, 
 			  kv.old_value 
 			FROM ' || _table_name || ' AS kv
+			CROSS JOIN (select max(id) as maxid, min(prev_revision) as compact_rev from ' || _table_name || ' ) as minmax
 			WHERE 
 			  kv.name LIKE $1
+			  AND id >= $2 
+			  AND id >= $3 
 			  AND ( kv.deleted = 0 OR $4 )
 			ORDER BY 
 			  kv.id ASC
@@ -171,10 +192,11 @@ var (
 		END;
 		$$ LANGUAGE plpgsql;`,
 
+		// Count -- row := l.queryRow(ctx, "SELECT maxid, count FROM countkeys($1);", prefix)
 		// count
 		`CREATE OR REPLACE FUNCTION countkeys(_name VARCHAR(630)) 
 		RETURNS TABLE (
-			maxid INTEGER,
+			maxid bigint,
 			count bigint
 		)
 		AS $$
@@ -183,14 +205,61 @@ var (
 			BEGIN 
 			
 			IF to_regclass(_table_name) IS NULL THEN
-			  RETURN QUERY EXECUTE 'SELECT currval(\'revision_seq\') as maxid, 0::bigint as count;';
+			  RETURN QUERY EXECUTE E'SELECT last_value as maxid, 0::bigint as count FROM revision_seq;';
 			ELSE 
-			  RETURN QUERY EXECUTE format('
-			    SELECT currval(\'revision_seq\') as maxid, count(distinct(name)) as count FROM  '|| _table_name );
+			  RETURN QUERY EXECUTE format(E'
+			    SELECT (SELECT last_value FROM revision_seq), (SELECT count(distinct(name)) as count FROM '|| _table_name ||') ' );
 			END IF;
 			
 			END
 		$$ LANGUAGE plpgsql;`,
+
+		// Polling -- rows, err := s.query(ctx, "SELECT * from listAll($1);", last)
+
+		//listAll
+		`CREATE OR REPLACE FUNCTION listAll(_startId INTEGER) 
+		RETURNS TABLE (
+		  maxid INTEGER, 
+		  rev_key INTEGER,
+		  theid INTEGER,
+		  name VARCHAR(630),
+		  created INTEGER,
+		  deleted INTEGER,
+		  create_revision INTEGER,
+		  prev_revision INTEGER,
+		  lease INTEGER,
+		  value bytea,
+		  old_value bytea
+		) 
+		AS $$
+		  declare
+		  	row record;
+		  BEGIN 
+
+		  FOR row IN 
+		  	SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name LIKE 'kine%'
+		  LOOP
+			RETURN QUERY EXECUTE format(E'SELECT 
+				maxid,
+				compact_rev,
+				kv.id as theid, 
+				kv.name, 
+				kv.created, 
+				kv.deleted, 
+				coalesce(kv.create_revision,0), 
+				coalesce(kv.prev_revision, id), 
+				kv.lease, 
+				kv.value, 
+				kv.old_value 
+			FROM "' || row.table_name || '" AS kv
+			CROSS JOIN (select max(id) as maxid, min(prev_revision) as compact_rev from "' || row.table_name || '" ) as minmax
+			WHERE 
+				id >= $1
+			ORDER BY id ASC') 
+			USING _startId;
+		  END LOOP;
+	  END;
+	  $$ LANGUAGE plpgsql;`,
 
 	}
 	createDB = "CREATE DATABASE "

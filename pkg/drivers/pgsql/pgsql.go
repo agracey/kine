@@ -13,23 +13,6 @@ import (
 
 const (
 	defaultDSN = "postgres://postgres:postgres@localhost/"
-	InsertSQL = `SELECT insert(NULL, $1, $2, $3, $4, $5, $6, $7, $8); -- InsertSQL`
-	CompactSQL = `CALL compaction($1, $2); -- CompactSQL`
-	InsertLastInsertIDSQL = `SELECT insert(NULL, $1, $2, $3, $4, $5, $6, $7, $8); -- InsertLastInsertIDSQL`
-	FillSQL = `SELECT insert($1, $2, $3, $4, $5, $6, $7, $8, $9); -- FillSQL`
-	CountSQL = `SELECT * FROM countkeys($1::varchar(630)); -- CountSQL`
-	AfterSQL = `SELECT * FROM list($1::varchar(630), $3::varchar(630), false, ''::varchar(630), $2::integer); -- AfterSQL`
-
-	// list('compact_rev_key', 'ALL', false, '%%'::varchar(630), 0)
-
-	// ARGS: prefix, revision, includeDeleted, limitString
-	ListRevisionStartSQL = `SELECT * FROM list($1::varchar(630), $4::varchar(630), $3, ''::varchar(630), $2::integer); -- ListRevisionStartSQL` 
-	
-	// ARGS: prefix, revision, startKey, revision, includeDeleted, limitString
-	GetRevisionAfterSQL = `SELECT * FROM list($1::varchar(630), $5::varchar(630), $4, $3::varchar(630), $2::integer); -- GetRevisionAfterSQL`
-
-	// ARGS: prefix, includeDeleted, limitString
-	GetCurrentSQL = `SELECT * FROM list($1::varchar(630), $3::varchar(630), $2, ''::varchar(630), 0); -- GetCurrentSQL`
 )
 
 
@@ -76,7 +59,7 @@ func databaseNameFromDSN(dataSourceName string) (string, error) {
 		return "", err
 	}
 	if len(u.Path) == 0 || u.Path == "/" {
-		u.Path = "/kubernetes"
+		u.Path = "/kinetest" //TODO
 	}
 
 	return u.Path, nil
@@ -93,7 +76,7 @@ func prepareDSN(dataSourceName string, tlsInfo tls.Config) (string, error) {
 		return "", err
 	}
 	if len(u.Path) == 0 || u.Path == "/" {
-		u.Path = "/kubernetes"
+		u.Path = "/kinetest"  //TODO
 	}
 
 	queryMap, err := url.ParseQuery(u.RawQuery)
