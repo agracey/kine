@@ -59,6 +59,7 @@ func (l *PGStructured) Get(ctx context.Context, key, rangeEnd string, limit, rev
 
 
 func (l *PGStructured) get(ctx context.Context, key, rangeEnd string, limit, revision int64, includeDeletes bool) (int64, *server.Event, error) {
+	logrus.Tracef("GET %s limit=%d, revision=%d, rangeEnd=%s", key, limit, revision, rangeEnd)
 	
 	rows, err := l.query(ctx, "SELECT * FROM list($1,$2, $3, $4, $5)", key, limit, includeDeletes, rangeEnd, revision)
 	rev, _, events, err := RowsToEvents(rows)
@@ -75,6 +76,7 @@ func (l *PGStructured) get(ctx context.Context, key, rangeEnd string, limit, rev
 	if len(events) == 0 {
 		return rev, nil, nil
 	}
+	logrus.Tracef("GOT %s rev=%d, #events %d, %v", key, rev, len(events), events[0])
 	return rev, events[0], nil
 }
 
@@ -109,10 +111,11 @@ func (l *PGStructured) Delete(ctx context.Context, key string, revision int64) (
 		return 0, nil, false, errRet
 	}
 
-	select {
-		case l.notify <- revRet:
-		default:
-	}
+	//TODO: will delete events get created in the watch stream? Need to check
+	// select {
+	// 	case l.notify <- revRet:
+	// 	default:
+	// }
 	
 	kvRet = &server.KeyValue {
 		Key: deletedKey,
@@ -131,18 +134,19 @@ func (l *PGStructured) List(ctx context.Context, prefix, startKey string, limit,
 	// 	logrus.Tracef("LIST %s, start=%s, limit=%d, rev=%d => rev=%d, kvs=%d, err=%v", prefix, startKey, limit, revision, revRet, len(kvRet), errRet)
 	// }()
 
+	logrus.Tracef("LIST %s limit=%s, startKey=%s, revision=%d ", prefix, limit, startKey, revision)
 	limitStr := "ALL"
-
 	if limit != 0 {
 		limitStr = strconv.FormatInt(limit, 10)
 	}
 
-	if !strings.HasSuffix(startKey, "/") {
-		startKey += "/"
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
 
-	startKey += "%"
+	prefix += "%"
 
+	logrus.Tracef("LISTING %s limitStr=%s, startKey=%s, revision=%d ", prefix, limitStr, startKey, revision)
 	rows, err := l.query(ctx, "SELECT * FROM list($1, $2, false, $3, $4);", prefix, limitStr, startKey, revision)
 	if err != nil {
 		return 0,nil,err
@@ -152,6 +156,7 @@ func (l *PGStructured) List(ctx context.Context, prefix, startKey string, limit,
 		logrus.Errorf("fail to convert rows when listing: %v", err)
 		return 0,nil,err
 	}
+	logrus.Tracef("LISTED %s rev=%d, #events %d", prefix, revRet, len(events))
 
 	//Fix revision number if no rows returned
 	if revRet == 0 {
@@ -258,7 +263,8 @@ func (s *PGStructured) poll(ctx context.Context, result chan interface{}, pollSt
 			logrus.Errorf("Failed to list latest changes while watching: %v", err)
 			continue
 		}
-		_, rev, events, err := RowsToEvents(rows)
+		//TODO rework to be simpler?
+		rev, _, events, err := RowsToEvents(rows)
 		last = rev
 		if err != nil {
 			logrus.Errorf("fail to convert rows changes: %v", err)
@@ -374,6 +380,19 @@ func TranslateErr(err error) error {
 	return err
 }
 
+
+// For reference:
+//
+// type KeyValue struct {
+// 	Key            string
+// 	CreateRevision int64
+// 	ModRevision    int64
+// 	Value          []byte
+// 	Lease          int64
+// }
+
+// id  | rev_key | theid |       name       | created | deleted | create_revision | prev_revision | lease |                value                 |              old_value               
+
 func RowsToEvents(rows *sql.Rows) (int64, int64, []*server.Event, error) {
 	var (
 		result  []*server.Event
@@ -385,6 +404,7 @@ func RowsToEvents(rows *sql.Rows) (int64, int64, []*server.Event, error) {
 	for rows.Next() {
 		event := &server.Event{}
 		if err := scan(rows, &rev, &compact, event); err != nil {
+			logrus.Errorf("Error Scanning in RowsToEvents, $v", err )
 			return 0, 0, nil, err
 		}
 		result = append(result, event)

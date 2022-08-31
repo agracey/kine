@@ -41,6 +41,11 @@ var (
 			_table_name VARCHAR(630) := split_part(_key, '/', 3);
 
 		BEGIN
+
+			IF _table_name = '%%' THEN
+				_table_name := '';
+			END IF;
+
 			_table_name := '"kine' || _table_name || '"';
 
 			IF to_regclass(_table_name) IS NULL THEN
@@ -96,12 +101,13 @@ var (
 		$$ LANGUAGE plpgsql;`,
 
 		// Delete - row := l.queryRow(ctx, "SELECT id, key, value FROM markDeleted($1, $2);", key, revision)
+		// errRet = row.Scan(&revRet, &deletedKey, &deletedValue)
 
 		//markDeleted
 		`CREATE OR REPLACE FUNCTION markDeleted(_name VARCHAR(630), _rev INTEGER) 
 		  RETURNS TABLE (
 			id INTEGER, 
-			key INTEGER,
+			key VARCHAR(630),
 			value bytea
 		  ) AS $$
 		DECLARE 
@@ -115,11 +121,12 @@ var (
 			RETURN QUERY EXECUTE format('UPDATE '|| _table_name ||' 
 				SET id=$1, 
 					deleted=1, 
-					previous_rev=id, 
+					prev_revision=id, 
 					old_value=value, 
 					value=DEFAULT 
-				WHERE name=$2') 				
-				USING nextval('revision_seq'), _name ;
+				WHERE name=$2
+				RETURNING id, name, old_value') 				
+				USING nextval('revision_seq'), _name  ;
 	
 		END;
 		$$ LANGUAGE plpgsql;`,
@@ -128,7 +135,7 @@ var (
 		//List -- rows, err := l.query(ctx, "SELECT * FROM list($1, $2, $3, $4);", prefix, limit, startKey, revision)
 		//Get -- rows, err := l.query(ctx, "SELECT * FROM list($1,$2, $3, $4, $5)", key, limit, includeDeletes, rangeEnd, revision)
 		
-		// TODO unsure about crossjoin...
+		// TODO unsure about crossjoin...  https://www.postgresql.org/docs/current/queries-with.html
 		// list
 		`CREATE OR REPLACE FUNCTION list(_name VARCHAR(630), _limit VARCHAR(630), _deleted BOOLEAN, _startKey VARCHAR(630), _revision INTEGER ) 
 		  RETURNS TABLE (

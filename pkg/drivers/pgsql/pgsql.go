@@ -3,6 +3,7 @@ package pgsql
 import (
 	"context"
 	"net/url"
+	"strings"
 
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/k3s-io/kine/pkg/tls"
@@ -53,6 +54,7 @@ func New(ctx context.Context, dataSourceName string, tlsInfo tls.Config, connPoo
 }
 
 
+// TODO: simplify
 func databaseNameFromDSN(dataSourceName string) (string, error) {
 	u, err := url.Parse(dataSourceName)
 	if err != nil {
@@ -62,7 +64,8 @@ func databaseNameFromDSN(dataSourceName string) (string, error) {
 		u.Path = "/kinetest" //TODO
 	}
 
-	return u.Path, nil
+	name := strings.TrimLeft(u.Path, "/")
+	return name, nil
 }
 
 func prepareDSN(dataSourceName string, tlsInfo tls.Config) (string, error) {
