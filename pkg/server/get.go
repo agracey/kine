@@ -17,6 +17,7 @@ func (l *LimitedServer) get(ctx context.Context, r *etcdserverpb.RangeRequest) (
 		return nil, err
 	}
 
+	//Revision - the revision of the key-value store when generating the response.
 	resp := &RangeResponse{
 		Header: txnHeader(rev),
 	}

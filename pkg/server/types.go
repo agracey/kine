@@ -56,6 +56,16 @@ type Transaction interface {
 	CurrentRevision(ctx context.Context) (int64, error)
 }
 
+
+// From: https://etcd.io/docs/v3.5/learning/api/#key-value-pair
+//
+// Key - key in bytes. An empty key is not allowed.
+// Value - value in bytes.
+// Version - version is the version of the key. A deletion resets the version to zero and any modification of the key increases its version.
+// Create_Revision - revision of the last creation on the key.
+// Mod_Revision - revision of the last modification on the key.
+// Lease - the ID of the lease attached to the key. If lease is 0, then no lease is attached to the key.
+
 type KeyValue struct {
 	Key            string
 	CreateRevision int64
@@ -63,6 +73,12 @@ type KeyValue struct {
 	Value          []byte
 	Lease          int64
 }
+
+// From: https://etcd.io/docs/v3.5/learning/api/#events
+//
+// Type - The kind of event. A PUT type indicates new data has been stored to the key. A DELETE indicates the key was deleted.
+// KV - The KeyValue associated with the event. A PUT event contains current kv pair. A PUT event with kv.Version=1 indicates the creation of a key. A DELETE event contains the deleted key with its modification revision set to the revision of deletion.
+// Prev_KV - The key-value pair for the key from the revision immediately before the event. To save bandwidth, it is only filled out if the watch has explicitly enabled it.
 
 type Event struct {
 	Delete bool

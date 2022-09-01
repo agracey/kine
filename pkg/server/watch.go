@@ -88,6 +88,7 @@ func (w *watcher) Start(ctx context.Context, r *etcdserverpb.WatchCreateRequest)
 				WatchId: id,
 				Events:  toEvents(events...),
 			}); err != nil {
+				logrus.Errorf("WATCH SEND err: %v",err)
 				w.Cancel(id, err)
 				continue
 			}
