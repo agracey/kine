@@ -109,12 +109,6 @@ func (l *PGStructured) Delete(ctx context.Context, key string, revision int64) (
 		return 0, nil, false, errRet
 	}
 
-	//TODO: will delete events get created in the watch stream? Need to check
-	// select {
-	// 	case l.notify <- revRet:
-	// 	default:
-	// }
-	
 	kvRet = &server.KeyValue {
 		Key: deletedKey,
 		CreateRevision: revRet,
