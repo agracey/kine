@@ -39,8 +39,6 @@ func (s *PGStructured) Start(ctx context.Context) error {
 	}
 
 	s.startPoll(ctx)
-
-	//TODO go l.ttl(ctx)
 	return nil
 }
 
@@ -146,7 +144,6 @@ func (l *PGStructured) List(ctx context.Context, prefix, startKey string, limit,
 	}
 	prefix += "%"
 
-
 	rows, err := l.query(ctx, "SELECT * FROM list($1, $2);", prefix, limit)
 	if err != nil {
 		return 0,nil,err
@@ -194,25 +191,35 @@ func (l *PGStructured) Count(ctx context.Context, prefix string) (revRet int64, 
 func (l *PGStructured) Update(ctx context.Context, key string, value []byte, revision, lease int64) (revRet int64, kvRet *server.KeyValue, updateRet bool, errRet error) {
 	var (
 		prev_revision int64
+		create_revision int64
+		old_value []byte
 	)
+	
 	// defer func() {
 	// 	logrus.Tracef("UPDATE %s, value=%d, rev=%d, lease=%v => rev=%d, updated=%v, err=%v", key, len(value), revision, lease, revRet, updateRet, errRet)
 	// }()
 
-	row := l.queryRow(ctx, "SELECT id, prev_revision FROM upsert($1, $2, $3);", key, lease, value)
-	errRet = row.Scan(&revRet, &prev_revision)
+	row := l.queryRow(ctx, "SELECT id, prev_revision, create_revision, old_value FROM upsert($1, $2, $3);", key, lease, value)
+	errRet = row.Scan(&revRet, &prev_revision, &create_revision, &old_value)
 	if errRet != nil {
 		return 0, nil, false, errRet
+	}
+
+	prevKV := &server.KeyValue{
+		Key:            key,
+		CreateRevision: create_revision,
+		Value:          old_value,
+		Lease:          lease,
 	}
 
 	updateEvent := &server.Event{
 		KV: &server.KeyValue{
 			Key:            key,
-			CreateRevision: revRet, // TODO event.KV.CreateRevision,
+			CreateRevision: create_revision,
 			Value:          value,
 			Lease:          lease,
 		},
-		// TODO add this back in -- PrevKV: event.KV,
+		PrevKV: prevKV,
 	}
 
 	updateEvent.KV.ModRevision = revRet

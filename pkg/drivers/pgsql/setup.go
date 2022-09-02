@@ -42,7 +42,9 @@ var (
 		) 
 		RETURNS TABLE (
 			id INTEGER,
-			prev_revision INTEGER
+			prev_revision INTEGER,
+			create_revision INTEGER,
+			old_value bytea
 		)
 		AS $$
 			DECLARE 
@@ -53,7 +55,7 @@ var (
 				VALUES (_insert_id, _insert_id, _name, _lease, _value) 
 					ON CONFLICT (name) DO UPDATE 
 					SET id = EXCLUDED.id, prev_revision = kine.id, old_value = kine.value, created = 0, deleted = 0
-					RETURNING kine.id, kine.prev_revision;
+					RETURNING kine.id, kine.prev_revision, kine.create_revision, kine.old_value;
 			END
 		$$ LANGUAGE plpgsql;`,
 
@@ -83,6 +85,7 @@ var (
 		//List -- rows, err := l.query(ctx, "SELECT * FROM list($1, $2);", prefix, limit)
 		//Get -- rows, err := l.query(ctx, "SELECT * FROM list($1,$2)", key, limit)
 		
+		// TODO should really just be a materialized view?
 		// TODO unsure about crossjoin...  https://www.postgresql.org/docs/current/queries-with.html
 		// list
 		`CREATE OR REPLACE FUNCTION list(_name VARCHAR(630), _limit INTEGER ) 
